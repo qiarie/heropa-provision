@@ -39,7 +39,7 @@ nginx/host/gateway.conf
 nginx/host/web.conf
 nginx/host/pipeline.conf
 nginx/host/superset.conf
-nginx/heropa/ohs-player-tls.conf
+nginx/heropa/ohs-player-heropa.conf
 
 # --- Logs & Temps ---
 logs/

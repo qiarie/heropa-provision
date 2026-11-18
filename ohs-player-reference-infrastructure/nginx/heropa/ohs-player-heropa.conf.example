@@ -1,0 +1,133 @@
+# Front for a Heropa lab VM, used by docker-compose.heropa.yml in place of
+# nginx/ohs-player.conf. dev.sh renders it into ohs-player-heropa.conf.
+#
+# Cloudflare terminates TLS and forwards plain HTTP to port 80 here, so this
+# file holds no certificate. Each Heropa Web component tab points at one path
+# on the same origin.
+#
+#   /            Web Portal
+#   /admin/      Keycloak admin console (with /realms, /resources and /js)
+#   /fhir, /api  FHIR gateway, called by the Portal
+#   /superset/   Superset, once ./dev.sh up --pipes has run
+#   /pipeline/   pipeline control panel, once ./dev.sh up --pipes has run
+#
+# Upstream names resolve per request through Docker's embedded DNS, so a
+# service that is not running answers 502 instead of stopping nginx.
+
+# The scheme the browser used. Cloudflare sends X-Forwarded-Proto https, and
+# Keycloak, Superset and the gateway build their links from it. A request
+# made on the VM itself, with curl, has no such header and stays http.
+map $http_x_forwarded_proto $ohs_proto {
+    default $http_x_forwarded_proto;
+    ""      $scheme;
+}
+
+server {
+    listen 80;
+    server_name _;
+
+    resolver 127.0.0.11 valid=30s ipv6=off;
+
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $ohs_proto;
+    proxy_set_header X-Forwarded-Host  $host;
+    proxy_set_header X-Forwarded-Port  443;
+
+    # --- Keycloak ------------------------------------------------------------
+    # The realm sets the framing headers for these pages through FRAME_ANCESTORS.
+    # The port is KEYCLOAK_PORT and is not templated, as in ohs-player.conf.
+    location /realms/ {
+        set $ohs_keycloak keycloak;
+        proxy_pass http://$ohs_keycloak:8081;
+    }
+
+    location /resources/ {
+        set $ohs_keycloak keycloak;
+        proxy_pass http://$ohs_keycloak:8081;
+    }
+
+    # The admin console and the master realm's login pages take their framing
+    # headers from the master realm, which is not imported from a file. So
+    # nginx swaps them for headers that let the Heropa portal frame the
+    # Keycloak tab, keeping the rest of Keycloak's default policy.
+    location /admin/ {
+        set $ohs_keycloak keycloak;
+        proxy_pass http://$ohs_keycloak:8081;
+        proxy_hide_header X-Frame-Options;
+        proxy_hide_header Content-Security-Policy;
+        add_header Content-Security-Policy "frame-src 'self'; frame-ancestors 'self' ${FRAME_ANCESTORS}; object-src 'none';" always;
+    }
+
+    location /realms/master/ {
+        set $ohs_keycloak keycloak;
+        proxy_pass http://$ohs_keycloak:8081;
+        proxy_hide_header X-Frame-Options;
+        proxy_hide_header Content-Security-Policy;
+        add_header Content-Security-Policy "frame-src 'self'; frame-ancestors 'self' ${FRAME_ANCESTORS}; object-src 'none';" always;
+    }
+
+    location /js/ {
+        set $ohs_keycloak keycloak;
+        proxy_pass http://$ohs_keycloak:8081;
+    }
+
+    # --- FHIR gateway --------------------------------------------------------
+    location /fhir {
+        set $ohs_gateway fhir-gateway;
+        proxy_pass http://$ohs_gateway:8080;
+        client_max_body_size 25m;
+    }
+
+    location /api/ {
+        set $ohs_gateway fhir-gateway;
+        proxy_pass http://$ohs_gateway:8080;
+        client_max_body_size 25m;
+    }
+
+    # --- Superset ------------------------------------------------------------
+    # Superset runs with SUPERSET_APP_ROOT=/superset, so the path passes through
+    # unchanged. Its own X-Frame-Options would stop the Heropa tab, and its
+    # session cookie needs SameSite=None to be sent from inside the frame.
+    # Superset's own Content-Security-Policy stays, since it sets no
+    # frame-ancestors, and the browser enforces the one added here as well.
+    location = /superset {
+        return 301 /superset/;
+    }
+
+    location /superset/ {
+        set $ohs_superset superset;
+        proxy_pass http://$ohs_superset:8088;
+        proxy_read_timeout 120s;
+        proxy_hide_header X-Frame-Options;
+        add_header Content-Security-Policy "frame-ancestors 'self' ${FRAME_ANCESTORS}" always;
+        proxy_cookie_flags ~ secure samesite=none;
+    }
+
+    # --- Pipeline control panel ----------------------------------------------
+    # The controller runs with the context path /pipeline, which fixes its page
+    # links and assets. The page scripts still call a few endpoints from the
+    # root, so those are sent to the controller as well.
+    location = /pipeline {
+        return 301 /pipeline/;
+    }
+
+    location /pipeline/ {
+        set $ohs_pipeline pipeline-controller;
+        proxy_pass http://$ohs_pipeline:8080;
+        proxy_hide_header X-Frame-Options;
+        add_header Content-Security-Policy "frame-ancestors 'self' ${FRAME_ANCESTORS}" always;
+    }
+
+    location ~ ^/(run|status|tables|download-error-log|actuator/pipeline-metrics)$ {
+        set $ohs_pipeline pipeline-controller;
+        proxy_pass http://$ohs_pipeline:8080/pipeline$uri$is_args$args;
+    }
+
+    # --- Web Portal (everything else) ----------------------------------------
+    location / {
+        set $ohs_web ohs-player-web;
+        proxy_pass http://$ohs_web:80;
+    }
+}

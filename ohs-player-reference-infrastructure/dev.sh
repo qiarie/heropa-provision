@@ -286,11 +286,11 @@ render_templates() {
                '${SUPERSET_HOST} ${SUPERSET_PORT}'
     fi
 
-    # The HTTPS front for a Heropa lab VM. Only read when COMPOSE_FILE names
-    # docker-compose.heropa.yml, and harmless to render otherwise.
-    render nginx/heropa/ohs-player-tls.conf.example \
-           nginx/heropa/ohs-player-tls.conf \
-           '${PUBLIC_HOST} ${FRAME_ANCESTORS}'
+    # The path-routed front for a Heropa lab VM. Only read when COMPOSE_FILE
+    # names docker-compose.heropa.yml, and harmless to render otherwise.
+    render nginx/heropa/ohs-player-heropa.conf.example \
+           nginx/heropa/ohs-player-heropa.conf \
+           '${FRAME_ANCESTORS}'
 
     if (( RENDER_CHANGED == 0 )); then
         info "Configuration is up to date."
@@ -598,13 +598,12 @@ PYEOF
     # compose comments because this is where someone looks after `up`, and the
     # ports move with .env.
     if profile_active pipes; then
-        # Behind docker-compose.heropa.yml both are reached through the HTTPS
-        # front on their own ports.
+        # Behind docker-compose.heropa.yml both are paths on the lab origin.
         local superset_url="http://localhost:${SUPERSET_PORT:-8088}"
         local pipeline_url="http://localhost:${PIPELINE_PORT:-8090}"
         if [[ "${COMPOSE_FILE:-}" == *docker-compose.heropa.yml* ]]; then
-            superset_url="https://${PUBLIC_HOST}:8443"
-            pipeline_url="https://${PUBLIC_HOST}:9443"
+            superset_url="${KEYCLOAK_PUBLIC_URL}/superset/"
+            pipeline_url="${KEYCLOAK_PUBLIC_URL}/pipeline/"
         fi
         echo
         echo "    Superset at $superset_url"
@@ -619,9 +618,10 @@ PYEOF
     if profile_active proxy; then
         local origin="http://${PUBLIC_HOST:-ohs-player.localhost}"
         [[ "${PROXY_PORT:-80}" == "80" ]] || origin="$origin:${PROXY_PORT}"
-        # Behind docker-compose.heropa.yml the front answers on 443 instead.
+        # Behind docker-compose.heropa.yml the browser reaches it through
+        # Cloudflare at the lab address, which is also the Keycloak address.
         [[ "${COMPOSE_FILE:-}" == *docker-compose.heropa.yml* ]] \
-            && origin="https://${PUBLIC_HOST}"
+            && origin="${KEYCLOAK_PUBLIC_URL}"
         echo
         echo "    Single origin front at $origin"
         echo "        Serves the Portal, the gateway and Keycloak from one name."
@@ -639,7 +639,7 @@ cmd_up() {
     parse_profiles "$@"
     check_prerequisites
     render_templates
-    # On a Heropa lab VM the HTTPS front is the only way in, so it comes up with
+    # On a Heropa lab VM the nginx front is the only way in, so it comes up with
     # every `up` whether or not --proxy was typed. COMPOSE_FILE is only known
     # once render_templates has loaded .env.
     if [[ "${COMPOSE_FILE:-}" == *docker-compose.heropa.yml* ]] && ! profile_active proxy; then
@@ -721,7 +721,7 @@ cmd_clean() {
           "$SCRIPT_DIR/nginx/host/web.conf" \
           "$SCRIPT_DIR/nginx/host/pipeline.conf" \
           "$SCRIPT_DIR/nginx/host/superset.conf" \
-          "$SCRIPT_DIR/nginx/heropa/ohs-player-tls.conf"
+          "$SCRIPT_DIR/nginx/heropa/ohs-player-heropa.conf"
 
     local project
     project="$(basename "$SCRIPT_DIR")"

@@ -6,35 +6,28 @@
 #
 #   COMPOSE_FILE=docker-compose.yaml:docker-compose.heropa.yml
 #
-# A Heropa lab VM without a desktop is reached through Heropa's Web component,
-# which embeds https://<PUBLIC_HOST> in the student's workspace. The proxy
-# profile already puts the Portal, the gateway and Keycloak on one origin, and
-# these overrides make that origin HTTPS.
-#
-# Start the stack with --proxy, or --full to add the analytics, because the
-# nginx service only exists in those profiles.
+# A Heropa lab VM is reached through Cloudflare, which terminates TLS and
+# forwards plain HTTP to port 80. Heropa's Web component then shows each app as
+# a tab by pointing at one path on that origin. nginx serves every path, so the
+# proxy profile is always on, and dev.sh adds it to every `up`.
 # =============================================================================
 
 services:
 
   nginx:
-    ports:
-      # Added to the base file's port 80 mapping, which now only redirects.
-      # 443 serves the Portal, the gateway and Keycloak. 8443 and 9443 serve
-      # Superset and the pipeline controller once the analytics are running.
-      - "443:443"
-      - "8443:8443"
-      - "9443:9443"
     volumes:
       # Same target as the base file's mount, so compose replaces it rather
       # than adding a second file.
-      - ./nginx/heropa/ohs-player-tls.conf:/etc/nginx/conf.d/default.conf:ro
-      # The live/ links point into archive/, so the whole tree is mounted.
-      # LETSENCRYPT_DIR exists for testing with a self-signed tree elsewhere.
-      - ${LETSENCRYPT_DIR:-/etc/letsencrypt}:/etc/letsencrypt:ro
+      - ./nginx/heropa/ohs-player-heropa.conf:/etc/nginx/conf.d/default.conf:ro
 
   superset:
     environment:
-      # Superset sits behind the HTTPS front on 8443, so it builds its links
-      # from the forwarded headers rather than from its own plain HTTP port.
+      # Served under /superset/ on the lab origin, behind nginx and Cloudflare.
+      - SUPERSET_APP_ROOT=/superset
       - SUPERSET_ENABLE_PROXY_FIX=true
+
+  pipeline-controller:
+    environment:
+      # Served under /pipeline/ on the lab origin. See the nginx file for the
+      # endpoints the page scripts still call from the root.
+      - SERVER_SERVLET_CONTEXT_PATH=/pipeline

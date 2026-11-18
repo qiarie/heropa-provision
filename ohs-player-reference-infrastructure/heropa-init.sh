@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 #
 # heropa-init.sh points the stack at this VM's lab address and starts it, so
-# Heropa's Web component can show each app as a tab.
+# Heropa's Iframe interfaces can show each app as a tab.
 #
 # Cloudflare holds the HTTPS certificate for the lab address and forwards plain
-# HTTP to port 80 on this VM. nginx then serves each tab as a path.
+# HTTP to port 80 on this VM. nginx then serves each app under its own path.
 #
-#   /            Web Portal
-#   /admin/      Keycloak admin console
+#   /web         Web Portal, which nginx redirects to /
+#   /keycloak/   Keycloak, with the admin console at /keycloak/admin/
+#   /gateway/    FHIR gateway
 #   /superset/   Superset, once ./dev.sh up --pipes has run
 #   /pipeline/   pipeline control panel, once ./dev.sh up --pipes has run
 #
@@ -33,7 +34,7 @@
 #                    https://yourcompany.heropa.com (required)
 #
 # The Heropa VM needs inbound TCP 80 from Cloudflare and outbound HTTPS. The
-# gateway checks sign-in tokens against Keycloak at LAB_URL, so it reaches
+# gateway checks sign-in tokens against Keycloak at LAB_URL/keycloak, so it reaches
 # Keycloak the same way a browser does, out through Cloudflare and back.
 #
 # Changing the address of a stack that already ran needs a fresh realm, because
@@ -132,14 +133,15 @@ info "The lab will answer at $LAB_URL"
 # --- 2. stale realm check ---------------------------------------------------
 
 PROJECT="${COMPOSE_PROJECT_NAME:-$(basename "$SCRIPT_DIR")}"
+KEYCLOAK_URL="$LAB_URL/keycloak"
 PREVIOUS_URL="$(env_get KEYCLOAK_PUBLIC_URL)"
-if [[ "$PREVIOUS_URL" != "$LAB_URL" ]] \
+if [[ "$PREVIOUS_URL" != "$KEYCLOAK_URL" ]] \
     && docker volume inspect "${PROJECT}_postgres_data" >/dev/null 2>&1; then
     if (( RESET )); then
         info "The address changed from ${PREVIOUS_URL:-unset}, so the volumes are being reset"
         "$SCRIPT_DIR/dev.sh" reset
     else
-        error "The address changed from ${PREVIOUS_URL:-unset} to $LAB_URL but Keycloak still holds the old realm. Rerun with --reset, which deletes all FHIR and Keycloak data."
+        error "The address changed from ${PREVIOUS_URL:-unset} to $KEYCLOAK_URL but Keycloak still holds the old realm. Rerun with --reset, which deletes all FHIR and Keycloak data."
     fi
 fi
 
@@ -147,9 +149,9 @@ fi
 
 info "Writing the lab settings into .env"
 env_set LAB_URL             "$LAB_URL"
-env_set KEYCLOAK_PUBLIC_URL "$LAB_URL"
+env_set KEYCLOAK_PUBLIC_URL "$KEYCLOAK_URL"
 env_set OHS_PLAYER_APP_HOST "$LAB_HOST"
-env_set VITE_FHIR_BASE_URL  "$LAB_URL/fhir"
+env_set VITE_FHIR_BASE_URL  "$LAB_URL/gateway/fhir"
 env_set BIND_ADDR           "127.0.0.1"
 env_set COMPOSE_FILE        "$OVERLAY"
 env_set FRAME_ANCESTORS     "$FRAME_ANCESTORS"
@@ -161,7 +163,7 @@ info "Starting the stack behind the nginx front"
 
 # The gateway reached Keycloak at LAB_URL to start at all, so a failure here
 # usually means Cloudflare is not yet sending the name to this VM.
-if curl -fsS -m 10 -o /dev/null "$LAB_URL/realms/ohs-player/.well-known/openid-configuration"; then
+if curl -fsS -m 10 -o /dev/null "$KEYCLOAK_URL/realms/ohs-player/.well-known/openid-configuration"; then
     info "$LAB_URL reaches this VM through Cloudflare"
 else
     warn "$LAB_URL did not answer. Check that Cloudflare points $LAB_HOST at this VM and that inbound TCP 80 is open."
@@ -169,11 +171,12 @@ fi
 
 cat <<EOF
 
-The lab is served at $LAB_URL. Give each Heropa Web component port 80 and
-one of these paths.
+The lab is served at $LAB_URL. Give each Heropa Iframe interface one of
+these paths.
 
-  Lab (Web Portal)         /
-  Keycloak admin console   /admin/
+  Web Portal               /web
+  Keycloak admin console   /keycloak/admin/
+  FHIR gateway             /gateway/fhir/metadata
   Superset                 /superset/
   Pipeline control panel   /pipeline/
 

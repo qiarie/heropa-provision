@@ -602,8 +602,8 @@ PYEOF
         local superset_url="http://localhost:${SUPERSET_PORT:-8088}"
         local pipeline_url="http://localhost:${PIPELINE_PORT:-8090}"
         if [[ "${COMPOSE_FILE:-}" == *docker-compose.heropa.yml* ]]; then
-            superset_url="${KEYCLOAK_PUBLIC_URL}/superset/"
-            pipeline_url="${KEYCLOAK_PUBLIC_URL}/pipeline/"
+            superset_url="${LAB_URL}/superset/"
+            pipeline_url="${LAB_URL}/pipeline/"
         fi
         echo
         echo "    Superset at $superset_url"
@@ -619,9 +619,9 @@ PYEOF
         local origin="http://${PUBLIC_HOST:-ohs-player.localhost}"
         [[ "${PROXY_PORT:-80}" == "80" ]] || origin="$origin:${PROXY_PORT}"
         # Behind docker-compose.heropa.yml the browser reaches it through
-        # Cloudflare at the lab address, which is also the Keycloak address.
+        # Cloudflare at the lab address.
         [[ "${COMPOSE_FILE:-}" == *docker-compose.heropa.yml* ]] \
-            && origin="${KEYCLOAK_PUBLIC_URL}"
+            && origin="${LAB_URL}"
         echo
         echo "    Single origin front at $origin"
         echo "        Serves the Portal, the gateway and Keycloak from one name."

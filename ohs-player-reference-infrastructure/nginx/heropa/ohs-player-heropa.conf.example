@@ -2,14 +2,17 @@
 # nginx/ohs-player.conf. dev.sh renders it into ohs-player-heropa.conf.
 #
 # Cloudflare terminates TLS and forwards plain HTTP to port 80 here, so this
-# file holds no certificate. Each Heropa Web component tab points at one path
-# on the same origin.
+# file holds no certificate. Each app has a path of its own on the one domain,
+# and each Heropa Iframe interface points at one of them.
 #
-#   /            Web Portal
-#   /admin/      Keycloak admin console (with /realms, /resources and /js)
-#   /fhir, /api  FHIR gateway, called by the Portal
+#   /web         redirects to /, where the Web Portal is served
+#   /keycloak/   Keycloak, with the admin console at /keycloak/admin/
+#   /gateway/    FHIR gateway, with /gateway/fhir and /gateway/api
 #   /superset/   Superset, once ./dev.sh up --pipes has run
 #   /pipeline/   pipeline control panel, once ./dev.sh up --pipes has run
+#
+# The Web Portal stays at the root because it cannot yet run under a path. Its
+# router has no base path, and its sign in callback is fixed at /callback.
 #
 # Upstream names resolve per request through Docker's embedded DNS, so a
 # service that is not running answers 502 instead of stopping nginx.
@@ -28,31 +31,43 @@ server {
 
     resolver 127.0.0.11 valid=30s ipv6=off;
 
-    proxy_set_header Host              $host;
+    # Redirects carry only the path. nginx only sees plain HTTP from
+    # Cloudflare, so an absolute redirect would send the browser to http://.
+    absolute_redirect off;
+
+    proxy_set_header Host             $host;
     proxy_set_header X-Real-IP         $remote_addr;
     proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $ohs_proto;
     proxy_set_header X-Forwarded-Host  $host;
     proxy_set_header X-Forwarded-Port  443;
 
-    # --- Keycloak ------------------------------------------------------------
-    # The realm sets the framing headers for these pages through FRAME_ANCESTORS.
-    # The port is KEYCLOAK_PORT and is not templated, as in ohs-player.conf.
-    location /realms/ {
-        set $ohs_keycloak keycloak;
-        proxy_pass http://$ohs_keycloak:8081;
+    # --- Web Portal ----------------------------------------------------------
+    # /web is the path the Heropa interface uses. It sends the browser to the
+    # root, where the Portal is served from the catch-all at the end.
+    location = /web {
+        return 302 /;
     }
 
-    location /resources/ {
+    location /web/ {
+        return 302 /;
+    }
+
+    # --- Keycloak ------------------------------------------------------------
+    # Keycloak runs with KC_HTTP_RELATIVE_PATH=/keycloak, so the path passes
+    # through unchanged. The port is KEYCLOAK_PORT and is not templated, as in
+    # ohs-player.conf. The ohs-player realm sets its own framing headers
+    # through FRAME_ANCESTORS.
+    location /keycloak/ {
         set $ohs_keycloak keycloak;
         proxy_pass http://$ohs_keycloak:8081;
     }
 
     # The admin console and the master realm's login pages take their framing
     # headers from the master realm, which is not imported from a file. So
-    # nginx swaps them for headers that let the Heropa portal frame the
-    # Keycloak tab, keeping the rest of Keycloak's default policy.
-    location /admin/ {
+    # nginx swaps them for headers that let the Heropa portal frame them,
+    # keeping the rest of Keycloak's default policy.
+    location /keycloak/admin/ {
         set $ohs_keycloak keycloak;
         proxy_pass http://$ohs_keycloak:8081;
         proxy_hide_header X-Frame-Options;
@@ -60,7 +75,7 @@ server {
         add_header Content-Security-Policy "frame-src 'self'; frame-ancestors 'self' ${FRAME_ANCESTORS}; object-src 'none';" always;
     }
 
-    location /realms/master/ {
+    location /keycloak/realms/master/ {
         set $ohs_keycloak keycloak;
         proxy_pass http://$ohs_keycloak:8081;
         proxy_hide_header X-Frame-Options;
@@ -68,22 +83,23 @@ server {
         add_header Content-Security-Policy "frame-src 'self'; frame-ancestors 'self' ${FRAME_ANCESTORS}; object-src 'none';" always;
     }
 
-    location /js/ {
-        set $ohs_keycloak keycloak;
-        proxy_pass http://$ohs_keycloak:8081;
+    location = /keycloak {
+        return 301 /keycloak/;
     }
 
     # --- FHIR gateway --------------------------------------------------------
-    location /fhir {
+    # The gateway serves /fhir and /api at its root, so the /gateway prefix is
+    # removed on the way in. The Portal is built with VITE_FHIR_BASE_URL
+    # ending in /gateway/fhir and derives /gateway/api from it.
+    location /gateway/ {
         set $ohs_gateway fhir-gateway;
+        rewrite ^/gateway(/.*)$ $1 break;
         proxy_pass http://$ohs_gateway:8080;
         client_max_body_size 25m;
     }
 
-    location /api/ {
-        set $ohs_gateway fhir-gateway;
-        proxy_pass http://$ohs_gateway:8080;
-        client_max_body_size 25m;
+    location = /gateway {
+        return 301 /gateway/;
     }
 
     # --- Superset ------------------------------------------------------------
@@ -92,10 +108,6 @@ server {
     # session cookie needs SameSite=None to be sent from inside the frame.
     # Superset's own Content-Security-Policy stays, since it sets no
     # frame-ancestors, and the browser enforces the one added here as well.
-    location = /superset {
-        return 301 /superset/;
-    }
-
     location /superset/ {
         set $ohs_superset superset;
         proxy_pass http://$ohs_superset:8088;
@@ -105,19 +117,23 @@ server {
         proxy_cookie_flags ~ secure samesite=none;
     }
 
+    location = /superset {
+        return 301 /superset/;
+    }
+
     # --- Pipeline control panel ----------------------------------------------
     # The controller runs with the context path /pipeline, which fixes its page
     # links and assets. The page scripts still call a few endpoints from the
     # root, so those are sent to the controller as well.
-    location = /pipeline {
-        return 301 /pipeline/;
-    }
-
     location /pipeline/ {
         set $ohs_pipeline pipeline-controller;
         proxy_pass http://$ohs_pipeline:8080;
         proxy_hide_header X-Frame-Options;
         add_header Content-Security-Policy "frame-ancestors 'self' ${FRAME_ANCESTORS}" always;
+    }
+
+    location = /pipeline {
+        return 301 /pipeline/;
     }
 
     location ~ ^/(run|status|tables|download-error-log|actuator/pipeline-metrics)$ {

@@ -1,0 +1,191 @@
+# HTTPS same-origin front for a Heropa lab VM (profile proxy, with
+# docker-compose.heropa.yml).
+#
+# Rendered by `./dev.sh render` into nginx/heropa/ohs-player-tls.conf, with
+# only ${PUBLIC_HOST} and ${FRAME_ANCESTORS} substituted. Heropa's Web component embeds the lab in its
+# HTTPS portal, so this front has to answer on 443 with a trusted certificate.
+# heropa-init.sh obtains that certificate before the stack starts.
+#
+# The routes mirror nginx/ohs-player.conf one for one. When a route changes
+# there, change it here too.
+#
+# Containers reach PUBLIC_HOST through the nginx network alias, so they arrive
+# on 443 like the browser does and the Keycloak issuer is one URL for both.
+
+server {
+    listen 80;
+    server_name _;
+
+    # Nothing is served over plain HTTP. Certificate renewals stop this
+    # container and answer the challenge with certbot's own listener.
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name _;
+
+    ssl_certificate     /etc/letsencrypt/live/${PUBLIC_HOST}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${PUBLIC_HOST}/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_session_cache   shared:SSL:10m;
+
+    # Docker's embedded DNS, resolved per request so a recreated container with
+    # a new IP is picked up without restarting nginx.
+    resolver 127.0.0.11 valid=30s ipv6=off;
+
+    # --- Keycloak ------------------------------------------------------------
+    # /realms holds the token, authorize and JWKS endpoints and the login pages.
+    # /resources holds the theme assets those pages load.
+    # /admin and /js serve the admin console.
+    #
+    # The port is KEYCLOAK_PORT and is not templated, as in ohs-player.conf.
+    location /realms/ {
+        set $ohs_keycloak keycloak;
+        proxy_pass http://$ohs_keycloak:8081;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+    }
+
+    location /resources/ {
+        set $ohs_keycloak_res keycloak;
+        proxy_pass http://$ohs_keycloak_res:8081;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+    }
+
+    location /admin/ {
+        set $ohs_keycloak_admin keycloak;
+        proxy_pass http://$ohs_keycloak_admin:8081;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+    }
+
+    location /js/ {
+        set $ohs_keycloak_js keycloak;
+        proxy_pass http://$ohs_keycloak_js:8081;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+    }
+
+    # --- FHIR gateway --------------------------------------------------------
+    # /fhir is the FHIR base and every resource under it.
+    # /api/ carries the ohs-player plugin's custom endpoints.
+    location /fhir {
+        set $ohs_gateway fhir-gateway;
+        proxy_pass http://$ohs_gateway:8080;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        client_max_body_size 25m;   # headroom for bulk-import payloads
+    }
+
+    location /api/ {
+        set $ohs_gateway_api fhir-gateway;
+        proxy_pass http://$ohs_gateway_api:8080;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        client_max_body_size 25m;
+    }
+
+    # --- Web Portal, everything else -----------------------------------------
+    location / {
+        set $ohs_web ohs-player-web;
+        proxy_pass http://$ohs_web:80;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# --- Analytics, profile pipes ------------------------------------------------
+# Superset and the pipeline controller keep their own ports, because neither
+# can be moved under a path prefix. Each gets its own Web component. Until the
+# analytics are started these answer 502.
+#
+# Both are framed by the Heropa portal, which is a different site. So the
+# anti-framing header is dropped, the portal is named in frame-ancestors, and
+# cookies are marked SameSite=None and Secure. Without that last part the
+# browser withholds Superset's session cookie inside the frame and every sign
+# in loops back to the login page.
+#
+# Host carries the port here, unlike on 443, so redirects come back to the
+# same listener rather than to the Portal.
+
+server {
+    listen 8443 ssl;
+    http2 on;
+    server_name _;
+
+    ssl_certificate     /etc/letsencrypt/live/${PUBLIC_HOST}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${PUBLIC_HOST}/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_session_cache   shared:SSL:10m;
+
+    resolver 127.0.0.11 valid=30s ipv6=off;
+
+    location / {
+        set $ohs_superset superset;
+        proxy_pass http://$ohs_superset:8088;
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $http_host;
+        proxy_set_header X-Forwarded-Port  $server_port;
+        proxy_read_timeout 120s;    # matches the gunicorn timeout
+
+        proxy_hide_header X-Frame-Options;
+        add_header Content-Security-Policy "frame-ancestors 'self' ${FRAME_ANCESTORS}" always;
+        proxy_cookie_flags ~ secure samesite=none;
+    }
+}
+
+server {
+    listen 9443 ssl;
+    http2 on;
+    server_name _;
+
+    ssl_certificate     /etc/letsencrypt/live/${PUBLIC_HOST}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${PUBLIC_HOST}/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_session_cache   shared:SSL:10m;
+
+    resolver 127.0.0.11 valid=30s ipv6=off;
+
+    # The controller has no sign in of its own. Anyone who learns this address
+    # while the lab runs can start a pipeline run and read the warehouse.
+    location / {
+        set $ohs_pipeline pipeline-controller;
+        proxy_pass http://$ohs_pipeline:8080;
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $http_host;
+        proxy_set_header X-Forwarded-Port  $server_port;
+
+        proxy_hide_header X-Frame-Options;
+        add_header Content-Security-Policy "frame-ancestors 'self' ${FRAME_ANCESTORS}" always;
+        proxy_cookie_flags ~ secure samesite=none;
+    }
+}

@@ -1,0 +1,52 @@
+# --- Docker ---
+.docker/
+# Ignore active containers/data if mapped to the project root
+data/
+db_data/
+data-pipes/dwh/*/
+*.tar
+*.tar.gz
+
+# --- Kubernetes ---
+.kube/
+# Ignore generated helm charts or temporary manifests
+charts/
+*-generated.yaml
+
+# --- Secrets & Environment ---
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+*.p12
+*.crt
+
+# --- Terraform (if used for infra) ---
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+
+# --- Rendered config (generated from *.example templates by dev.sh) ---
+keycloak/ohs-player-realm.json
+hapi-fhir/application-no-auth.yaml
+hapi-fhir/application-auth.yaml
+data-pipes/config/postgres-analytics.json
+nginx/host/keycloak.conf
+nginx/host/gateway.conf
+nginx/host/web.conf
+nginx/host/pipeline.conf
+nginx/host/superset.conf
+nginx/heropa/ohs-player-tls.conf
+
+# --- Logs & Temps ---
+logs/
+*.log
+tmp/
+.DS_Store
+
+# --- Agent workspaces (local tooling, never shared) ---
+.claude/
+.superpowers/

@@ -29,12 +29,11 @@ server {
     listen 80;
     server_name _;
 
-    # Port 443 is for the containers only and is not published on the VM. The
-    # gateway checks tokens against Keycloak at LAB_URL, and the lab name may
-    # not resolve or route from inside the VM. docker-compose.heropa.yml gives
-    # this container the lab host name as a network alias, so that request
-    # lands here. heropa-init.sh makes the self-signed certificate and a trust
-    # store the gateway loads.
+    # Port 443 serves two callers. Heropa's Iframe interfaces connect to the VM
+    # on 443, and the gateway reaches Keycloak at LAB_URL through the network
+    # alias that docker-compose.heropa.yml gives this container, because the
+    # lab name may not resolve or route from inside the VM. heropa-init.sh
+    # makes the self-signed certificate and a trust store the gateway loads.
     listen 443 ssl;
     ssl_certificate     /etc/nginx/certs/lab.crt;
     ssl_certificate_key /etc/nginx/certs/lab.key;

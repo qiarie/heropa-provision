@@ -35,7 +35,8 @@
 #   FRAME_ANCESTORS  the Heropa portal origin, for example
 #                    https://yourcompany.heropa.com (required)
 #
-# The Heropa VM needs inbound TCP 80 from Cloudflare. The gateway checks
+# Heropa reaches the VM on TCP 443, which nginx serves with a self-signed
+# certificate. The gateway checks
 # sign-in tokens against Keycloak at LAB_URL/keycloak, and reaches it inside
 # Docker through the nginx alias, so it works even where the lab name does not
 # resolve on the VM.
@@ -197,7 +198,7 @@ info "Starting the stack behind the nginx front"
 if curl -fsS -m 10 -o /dev/null "$KEYCLOAK_URL/realms/ohs-player/.well-known/openid-configuration"; then
     info "$LAB_URL reaches this VM through Cloudflare"
 else
-    warn "$LAB_URL did not answer. Check that Cloudflare points $LAB_HOST at this VM and that inbound TCP 80 is open."
+    warn "$LAB_URL did not answer. Check that Cloudflare points $LAB_HOST at this VM and that inbound TCP 443 is open."
 fi
 
 cat <<EOF

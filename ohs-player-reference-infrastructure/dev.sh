@@ -722,6 +722,7 @@ cmd_clean() {
           "$SCRIPT_DIR/nginx/host/pipeline.conf" \
           "$SCRIPT_DIR/nginx/host/superset.conf" \
           "$SCRIPT_DIR/nginx/heropa/ohs-player-heropa.conf"
+    rm -rf "$SCRIPT_DIR/nginx/heropa/certs"
 
     local project
     project="$(basename "$SCRIPT_DIR")"

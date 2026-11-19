@@ -18,13 +18,15 @@
 #
 #   ./heropa-init.sh [--reset] [dev.sh up flags]
 #
-# It does three things.
+# It does four things.
 #
 #   1. Writes the lab settings into .env (KEYCLOAK_PUBLIC_URL,
 #      OHS_PLAYER_APP_HOST, VITE_FHIR_BASE_URL, BIND_ADDR, COMPOSE_FILE,
 #      LAB_URL and FRAME_ANCESTORS).
-#   2. Checks that the lab address reaches this VM through Cloudflare.
+#   2. Makes a self-signed certificate for the lab host name, which only the
+#      containers use, and a trust store for the gateway.
 #   3. Runs ./dev.sh up --proxy with any flags given, for example --pipes.
+#   4. Checks that the lab address reaches this VM through Cloudflare.
 #
 # Settings come from the environment, then .env, then .env.example.
 #
@@ -33,9 +35,10 @@
 #   FRAME_ANCESTORS  the Heropa portal origin, for example
 #                    https://yourcompany.heropa.com (required)
 #
-# The Heropa VM needs inbound TCP 80 from Cloudflare and outbound HTTPS. The
-# gateway checks sign-in tokens against Keycloak at LAB_URL/keycloak, so it reaches
-# Keycloak the same way a browser does, out through Cloudflare and back.
+# The Heropa VM needs inbound TCP 80 from Cloudflare. The gateway checks
+# sign-in tokens against Keycloak at LAB_URL/keycloak, and reaches it inside
+# Docker through the nginx alias, so it works even where the lab name does not
+# resolve on the VM.
 #
 # Changing the address of a stack that already ran needs a fresh realm, because
 # Keycloak only imports it into an empty database. Pass --reset to wipe the
@@ -156,7 +159,35 @@ env_set BIND_ADDR           "127.0.0.1"
 env_set COMPOSE_FILE        "$OVERLAY"
 env_set FRAME_ANCESTORS     "$FRAME_ANCESTORS"
 
-# --- 4. start ---------------------------------------------------------------
+# --- 4. internal certificate ------------------------------------------------
+
+# nginx answers the lab host name on port 443 inside Docker, so the gateway can
+# reach Keycloak without leaving the VM. The certificate is self-signed and
+# only the gateway trusts it, through a copy of the Java trust store with this
+# one certificate added. Both are remade when the lab host name changes.
+CERT_DIR="$SCRIPT_DIR/nginx/heropa/certs"
+mkdir -p "$CERT_DIR"
+if ! openssl x509 -in "$CERT_DIR/lab.crt" -noout -checkhost "$LAB_HOST" 2>/dev/null | grep -q 'does match' \
+    || [[ ! -s "$CERT_DIR/truststore.p12" ]]; then
+    command -v openssl >/dev/null 2>&1 || error "openssl is not installed. Run sudo apt-get install -y openssl"
+    info "Making the internal certificate for $LAB_HOST"
+    rm -f "$CERT_DIR/lab.crt" "$CERT_DIR/lab.key" "$CERT_DIR/truststore.p12"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
+        -subj "/CN=$LAB_HOST" -addext "subjectAltName=DNS:$LAB_HOST" \
+        -keyout "$CERT_DIR/lab.key" -out "$CERT_DIR/lab.crt" 2>/dev/null
+    chmod 644 "$CERT_DIR/lab.key"   # read by nginx inside its container
+    # The gateway image is built on eclipse-temurin 21, so its keytool and
+    # default trust store match the JVM that loads the result.
+    docker run --rm --user "$(id -u):$(id -g)" -v "$CERT_DIR:/certs" \
+        --entrypoint sh eclipse-temurin:21-jre -c '
+            cp "$JAVA_HOME/lib/security/cacerts" /certs/truststore.p12 &&
+            chmod 644 /certs/truststore.p12 &&
+            keytool -importcert -noprompt -alias ohs-lab -file /certs/lab.crt \
+                -keystore /certs/truststore.p12 -storepass changeit >/dev/null' \
+        || error "Could not build the gateway trust store."
+fi
+
+# --- 5. start ---------------------------------------------------------------
 
 info "Starting the stack behind the nginx front"
 "$SCRIPT_DIR/dev.sh" up --proxy ${UP_ARGS[@]+"${UP_ARGS[@]}"}

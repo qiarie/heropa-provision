@@ -1,9 +1,10 @@
 # Front for a Heropa lab VM, used by docker-compose.heropa.yml in place of
 # nginx/ohs-player.conf. dev.sh renders it into ohs-player-heropa.conf.
 #
-# Cloudflare terminates TLS and forwards plain HTTP to port 80 here, so this
-# file holds no certificate. Each app has a path of its own on the one domain,
-# and each Heropa Iframe interface points at one of them.
+# nginx terminates TLS on port 443 with the certificate heropa-init.sh puts in
+# nginx/heropa/certs. Each app has a path of its own on the one lab address,
+# and each Heropa Iframe interface points at one of them. Port 80 serves the
+# same routes for checks on the VM itself.
 #
 #   /web         redirects to /, where the Web Portal is served
 #   /keycloak/   Keycloak, with the admin console at /keycloak/admin/
@@ -17,9 +18,10 @@
 # Upstream names resolve per request through Docker's embedded DNS, so a
 # service that is not running answers 502 instead of stopping nginx.
 
-# The scheme the browser used. Cloudflare sends X-Forwarded-Proto https, and
-# Keycloak, Superset and the gateway build their links from it. A request
-# made on the VM itself, with curl, has no such header and stays http.
+# The scheme the browser used, which Keycloak, Superset and the gateway build
+# their links from. A forwarded header from a proxy in front wins, so the
+# scheme stays right if one is ever added. Otherwise it is https on 443 and
+# http on 80.
 map $http_x_forwarded_proto $ohs_proto {
     default $http_x_forwarded_proto;
     ""      $scheme;
@@ -29,19 +31,19 @@ server {
     listen 80;
     server_name _;
 
-    # Port 443 serves two callers. Heropa's Iframe interfaces connect to the VM
-    # on 443, and the gateway reaches Keycloak at LAB_URL through the network
-    # alias that docker-compose.heropa.yml gives this container, because the
-    # lab name may not resolve or route from inside the VM. heropa-init.sh
-    # makes the self-signed certificate and a trust store the gateway loads.
+    # Port 443 serves two callers. Browsers and Heropa's Iframe interfaces
+    # reach the VM on 443, and the gateway reaches Keycloak at LAB_URL through
+    # the network alias that docker-compose.heropa.yml gives this container,
+    # so its traffic never leaves the VM. heropa-init.sh puts the certificate
+    # here and builds a trust store the gateway loads.
     listen 443 ssl;
     ssl_certificate     /etc/nginx/certs/lab.crt;
     ssl_certificate_key /etc/nginx/certs/lab.key;
 
     resolver 127.0.0.11 valid=30s ipv6=off;
 
-    # Redirects carry only the path. nginx only sees plain HTTP from
-    # Cloudflare, so an absolute redirect would send the browser to http://.
+    # Redirects carry only the path, so the browser keeps the scheme and port
+    # it came in on.
     absolute_redirect off;
 
     proxy_set_header Host             $host;

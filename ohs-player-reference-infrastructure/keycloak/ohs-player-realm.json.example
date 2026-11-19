@@ -1953,7 +1953,7 @@
       "protocol": "openid-connect",
       "attributes": {
         "realm_client": "false",
-        "client.use.lightweight.access.token.enabled": "true"
+        "client.use.lightweight.access.token.enabled": "false"
       },
       "authenticationFlowBindingOverrides": {},
       "fullScopeAllowed": true,

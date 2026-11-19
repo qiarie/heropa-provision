@@ -433,8 +433,13 @@ cmd_seed() {
 
     wait_for_hapi || error "HAPI FHIR did not become ready; is the stack up?"
 
+    # Behind docker-compose.heropa.yml Keycloak serves everything under
+    # /keycloak, so the seed's admin calls need that prefix too.
+    local kc_url="http://keycloak:${KEYCLOAK_PORT:-8081}"
+    [[ "${COMPOSE_FILE:-}" == *docker-compose.heropa.yml* ]] && kc_url="$kc_url/keycloak"
+
     info "Seeding sample FHIR data..."
-    FHIR_NET="$(compose_network)" "$script"
+    FHIR_NET="$(compose_network)" KC_URL="${KC_URL:-$kc_url}" "$script"
 }
 
 # The compose project name prefixes the network; deriving it keeps the seed
@@ -618,8 +623,8 @@ PYEOF
     if profile_active proxy; then
         local origin="http://${PUBLIC_HOST:-ohs-player.localhost}"
         [[ "${PROXY_PORT:-80}" == "80" ]] || origin="$origin:${PROXY_PORT}"
-        # Behind docker-compose.heropa.yml the browser reaches it through
-        # Cloudflare at the lab address.
+        # Behind docker-compose.heropa.yml the browser reaches it over HTTPS
+        # at the lab address.
         [[ "${COMPOSE_FILE:-}" == *docker-compose.heropa.yml* ]] \
             && origin="${LAB_URL}"
         echo

@@ -6,11 +6,10 @@
 #
 #   COMPOSE_FILE=docker-compose.yaml:docker-compose.heropa.yml
 #
-# A Heropa lab VM is reached through Cloudflare, which terminates TLS and
-# forwards plain HTTP to port 80. Each Heropa Iframe interface then points at
-# one app's path on that origin, /web, /keycloak, /gateway, /superset or
-# /pipeline. nginx serves every path, so the proxy profile is always on, and
-# dev.sh adds it to every `up`.
+# A Heropa lab VM is reached over HTTPS on port 443 at LAB_URL, which by
+# default is the VM's <a-b-c-d>.sslip.io name. nginx serves each app under one
+# path on that origin, /web, /keycloak, /gateway, /superset or /pipeline, so
+# the proxy profile is always on, and dev.sh adds it to every `up`.
 # =============================================================================
 
 services:
@@ -26,15 +25,15 @@ services:
 
   nginx:
     ports:
-      # Heropa's Iframe interfaces connect to the VM on port 443, and the
-      # Heropa firewall lets 443 in while dropping 80. Port 80 stays published
-      # for checks on the VM itself.
+      # Browsers and Heropa's Iframe interfaces connect on 443. Port 80 stays
+      # published from the base file for checks on the VM itself, and
+      # certbot borrows it while nginx is stopped.
       - "443:443"
     volumes:
       # Same target as the base file's mount, so compose replaces it rather
       # than adding a second file.
       - ./nginx/heropa/ohs-player-heropa.conf:/etc/nginx/conf.d/default.conf:ro
-      # Self-signed certificate for the lab host name, made by heropa-init.sh.
+      # Certificate for the lab host name, put here by heropa-init.sh.
       - ./nginx/heropa/certs:/etc/nginx/certs:ro
     networks:
       fhir_net:
@@ -57,7 +56,7 @@ services:
 
   superset:
     environment:
-      # Served under /superset/ on the lab origin, behind nginx and Cloudflare.
+      # Served under /superset/ on the lab origin, behind nginx.
       - SUPERSET_APP_ROOT=/superset
       - SUPERSET_ENABLE_PROXY_FIX=true
 

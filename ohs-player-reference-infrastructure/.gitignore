@@ -41,6 +41,7 @@ nginx/host/pipeline.conf
 nginx/host/superset.conf
 nginx/heropa/ohs-player-heropa.conf
 nginx/heropa/certs/
+nginx/heropa/letsencrypt/
 
 # --- Logs & Temps ---
 logs/

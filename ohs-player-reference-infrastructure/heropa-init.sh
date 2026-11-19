@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 #
-# heropa-init.sh points the stack at this VM's lab address and starts it, so
-# Heropa's Iframe interfaces can show each app as a tab.
-#
-# Cloudflare holds the HTTPS certificate for the lab address and forwards plain
-# HTTP to port 80 on this VM. nginx then serves each app under its own path.
+# heropa-init.sh points the stack at this VM's lab address and starts it over
+# HTTPS, with each app under its own path on that one address.
 #
 #   /web         Web Portal, which nginx redirects to /
 #   /keycloak/   Keycloak, with the admin console at /keycloak/admin/
@@ -18,28 +15,35 @@
 #
 #   ./heropa-init.sh [--reset] [dev.sh up flags]
 #
-# It does four things.
+# It does five things.
 #
-#   1. Writes the lab settings into .env (KEYCLOAK_PUBLIC_URL,
-#      OHS_PLAYER_APP_HOST, VITE_FHIR_BASE_URL, BIND_ADDR, COMPOSE_FILE,
-#      LAB_URL and FRAME_ANCESTORS).
-#   2. Makes a self-signed certificate for the lab host name, which only the
-#      containers use, and a trust store for the gateway.
-#   3. Runs ./dev.sh up --proxy with any flags given, for example --pipes.
-#   4. Checks that the lab address reaches this VM through Cloudflare.
+#   1. Works out the lab address. It reads the VM's public IP from the AWS
+#      instance metadata service and always uses https://<a-b-c-d>.sslip.io,
+#      a name that sslip.io's public DNS answers with that IP. Every app,
+#      Keycloak's issuer and the certificate use that one name.
+#   2. Writes the lab settings into .env (LAB_URL, KEYCLOAK_PUBLIC_URL,
+#      OHS_PLAYER_APP_HOST, VITE_FHIR_BASE_URL, BIND_ADDR, COMPOSE_FILE and
+#      FRAME_ANCESTORS).
+#   3. Gets a Let's Encrypt certificate for that name through the certbot
+#      image, for nginx to serve on 443.
+#   4. Builds a trust store so the gateway accepts that certificate when it
+#      reaches Keycloak inside Docker.
+#   5. Runs ./dev.sh up --proxy with any flags given, for example --pipes.
 #
 # Settings come from the environment, then .env, then .env.example.
 #
-#   LAB_URL          the HTTPS address Cloudflare serves for this VM, for
-#                    example https://lab-01.example.org (required)
-#   FRAME_ANCESTORS  the Heropa portal origin, for example
-#                    https://yourcompany.heropa.com (required)
+#   PUBLIC_IP      skips the metadata lookup, for testing off Heropa
+#   LAB_CERT       self-signed, for testing where Let's Encrypt cannot reach
+#                  the machine. The default is letsencrypt.
 #
-# Heropa reaches the VM on TCP 443, which nginx serves with a self-signed
-# certificate. The gateway checks
-# sign-in tokens against Keycloak at LAB_URL/keycloak, and reaches it inside
-# Docker through the nginx alias, so it works even where the lab name does not
-# resolve on the VM.
+# LAB_URL is written by this script and never read from anywhere. A value
+# already in .env, such as the Heropa portal address, is replaced.
+#   CERTBOT_EMAIL  Let's Encrypt account address, optional
+#
+# For a Let's Encrypt certificate the Heropa VM needs a permanent public IP
+# and inbound TCP 80 and 443 from 0.0.0.0/0. Let's Encrypt checks over port 80
+# from addresses it does not publish, so that rule cannot be narrowed.
+# Outbound traffic must stay open to pull images and reach Let's Encrypt.
 #
 # Changing the address of a stack that already ran needs a fresh realm, because
 # Keycloak only imports it into an empty database. Pass --reset to wipe the
@@ -51,6 +55,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env"
 EXAMPLE_FILE="$SCRIPT_DIR/.env.example"
 OVERLAY="docker-compose.yaml:docker-compose.heropa.yml"
+NGINX_CONTAINER="ohs-nginx"
+CERTBOT_IMAGE="certbot/certbot:v3.0.1"
+CERT_DIR="$SCRIPT_DIR/nginx/heropa/certs"
+# Kept apart from CERT_DIR so ./dev.sh clean leaves the Let's Encrypt account
+# and certificate alone. Let's Encrypt issues the same name only five times a
+# week, so a test cycle of clean and init must not ask for a new one each time.
+LE_DIR="$SCRIPT_DIR/nginx/heropa/letsencrypt"
 
 info()  { printf '\033[0;32m[INFO]\033[0m  %s\n' "$*"; }
 warn()  { printf '\033[1;33m[WARN]\033[0m  %s\n' "$*" >&2; }
@@ -109,8 +120,9 @@ env_set() {
 
 # --- 1. preflight -----------------------------------------------------------
 
-command -v docker >/dev/null 2>&1 || error "docker is not installed. Run provision-heropa.sh first."
-command -v curl   >/dev/null 2>&1 || error "curl is not installed."
+command -v docker  >/dev/null 2>&1 || error "docker is not installed. Run provision-heropa.sh first."
+command -v curl    >/dev/null 2>&1 || error "curl is not installed."
+command -v openssl >/dev/null 2>&1 || error "openssl is not installed. Run sudo apt-get install -y openssl"
 docker info >/dev/null 2>&1 \
     || error "Cannot talk to Docker. Log out and back in, or run newgrp docker, then retry."
 
@@ -120,21 +132,45 @@ if [[ ! -f "$ENV_FILE" ]]; then
     chmod 600 "$ENV_FILE"
 fi
 
-LAB_URL="$(setting LAB_URL)"
-LAB_URL="${LAB_URL%/}"
-[[ -n "$LAB_URL" ]] \
-    || error "Set LAB_URL to the HTTPS address Cloudflare serves for this VM, for example LAB_URL=https://lab-01.example.org $0"
-[[ "$LAB_URL" =~ ^https://[A-Za-z0-9.-]+$ ]] \
-    || error "LAB_URL must be https:// followed by a host name and nothing else, not $LAB_URL"
-LAB_HOST="${LAB_URL#https://}"
-
 FRAME_ANCESTORS="https://ohs.heropa.com"
 [[ -n "$FRAME_ANCESTORS" ]] \
     || error "Set FRAME_ANCESTORS to the Heropa portal origin, for example FRAME_ANCESTORS=https://yourcompany.heropa.com $0"
 
-info "The lab will answer at $LAB_URL"
+CERTBOT_EMAIL="$(setting CERTBOT_EMAIL)"
 
-# --- 2. stale realm check ---------------------------------------------------
+# --- 2. lab address ---------------------------------------------------------
+
+# IMDSv2 first, which needs a session token, then IMDSv1 for older instances.
+lookup_public_ip() {
+    local base="http://169.254.169.254/latest" token
+    token="$(curl -fsS -m 3 -X PUT "$base/api/token" \
+        -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null || true)"
+    if [[ -n "$token" ]]; then
+        curl -fsS -m 3 -H "X-aws-ec2-metadata-token: $token" \
+            "$base/meta-data/public-ipv4" 2>/dev/null && return 0
+    fi
+    curl -fsS -m 3 "$base/meta-data/public-ipv4" 2>/dev/null
+}
+
+OLD_LAB_URL="$(env_get LAB_URL)"
+PUBLIC_IP="${PUBLIC_IP:-$(lookup_public_ip || true)}"
+[[ "$PUBLIC_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || error "Could not read a public IPv4 address. Give the VM a permanent public IP in Heropa, or set PUBLIC_IP."
+info "Public IP is $PUBLIC_IP"
+LAB_HOST="${PUBLIC_IP//./-}.sslip.io"
+LAB_URL="https://$LAB_HOST"
+if [[ -n "$OLD_LAB_URL" && "$OLD_LAB_URL" != "$LAB_URL" ]]; then
+    warn "Replacing LAB_URL=$OLD_LAB_URL in .env with $LAB_URL"
+fi
+
+LAB_CERT="$(setting LAB_CERT)"
+LAB_CERT="${LAB_CERT:-letsencrypt}"
+[[ "$LAB_CERT" == letsencrypt || "$LAB_CERT" == self-signed ]] \
+    || error "LAB_CERT must be letsencrypt or self-signed, not $LAB_CERT"
+
+info "The lab will answer at $LAB_URL with a $LAB_CERT certificate"
+
+# --- 3. stale realm check ---------------------------------------------------
 
 PROJECT="${COMPOSE_PROJECT_NAME:-$(basename "$SCRIPT_DIR")}"
 KEYCLOAK_URL="$LAB_URL/keycloak"
@@ -149,7 +185,7 @@ if [[ "$PREVIOUS_URL" != "$KEYCLOAK_URL" ]] \
     fi
 fi
 
-# --- 3. .env ----------------------------------------------------------------
+# --- 4. .env ----------------------------------------------------------------
 
 info "Writing the lab settings into .env"
 env_set LAB_URL             "$LAB_URL"
@@ -160,25 +196,72 @@ env_set BIND_ADDR           "127.0.0.1"
 env_set COMPOSE_FILE        "$OVERLAY"
 env_set FRAME_ANCESTORS     "$FRAME_ANCESTORS"
 
-# --- 4. internal certificate ------------------------------------------------
+# --- 5. certificate ---------------------------------------------------------
 
-# nginx answers the lab host name on port 443 inside Docker, so the gateway can
-# reach Keycloak without leaving the VM. The certificate is self-signed and
-# only the gateway trusts it, through a copy of the Java trust store with this
-# one certificate added. Both are remade when the lab host name changes.
-CERT_DIR="$SCRIPT_DIR/nginx/heropa/certs"
 mkdir -p "$CERT_DIR"
-if ! openssl x509 -in "$CERT_DIR/lab.crt" -noout -checkhost "$LAB_HOST" 2>/dev/null | grep -q 'does match' \
-    || [[ ! -s "$CERT_DIR/truststore.p12" ]]; then
-    command -v openssl >/dev/null 2>&1 || error "openssl is not installed. Run sudo apt-get install -y openssl"
-    info "Making the internal certificate for $LAB_HOST"
-    rm -f "$CERT_DIR/lab.crt" "$CERT_DIR/lab.key" "$CERT_DIR/truststore.p12"
+
+# True when lab.crt names LAB_HOST and stays valid for at least DAYS more.
+cert_fits() {
+    local days="$1"
+    openssl x509 -in "$CERT_DIR/lab.crt" -noout -checkhost "$LAB_HOST" 2>/dev/null | grep -q 'does match' \
+        && openssl x509 -in "$CERT_DIR/lab.crt" -noout -checkend $(( days * 86400 )) >/dev/null 2>&1 \
+        && [[ -s "$CERT_DIR/lab.key" ]]
+}
+
+# True when lab.crt signed itself, which is how a leftover test certificate
+# is told apart from a Let's Encrypt one.
+cert_self_signed() {
+    [[ "$(openssl x509 -in "$CERT_DIR/lab.crt" -noout -subject 2>/dev/null | sed 's/^subject=//')" \
+        == "$(openssl x509 -in "$CERT_DIR/lab.crt" -noout -issuer 2>/dev/null | sed 's/^issuer=//')" ]]
+}
+
+if [[ "$LAB_CERT" == letsencrypt ]]; then
+    if cert_fits 30 && ! cert_self_signed; then
+        info "The Let's Encrypt certificate for $LAB_HOST is already in place"
+    else
+        info "Requesting a Let's Encrypt certificate for $LAB_HOST"
+        email_args=(--register-unsafely-without-email)
+        [[ -n "$CERTBOT_EMAIL" ]] && email_args=(--email "$CERTBOT_EMAIL")
+
+        # certbot answers the check on port 80 itself, so nginx gives the port
+        # up for the minute this takes. ./dev.sh up starts it again below.
+        docker stop "$NGINX_CONTAINER" >/dev/null 2>&1 || true
+        mkdir -p "$LE_DIR"
+        docker run --rm -p 80:80 -v "$LE_DIR:/etc/letsencrypt" "$CERTBOT_IMAGE" \
+            certonly --standalone --non-interactive --agree-tos --keep-until-expiring \
+            "${email_args[@]}" --cert-name "$LAB_HOST" -d "$LAB_HOST" \
+            || error "certbot failed. Check that the Heropa network rules allow inbound TCP 80 from 0.0.0.0/0 and that $LAB_HOST resolves to this VM's public IP."
+
+        # certbot writes as root and keeps symlinks under live/. Copy plain
+        # files that nginx can read and this user can replace later.
+        docker run --rm -v "$LE_DIR:/etc/letsencrypt" -v "$CERT_DIR:/out" \
+            --entrypoint sh "$CERTBOT_IMAGE" -c '
+                cp -L "/etc/letsencrypt/live/$1/fullchain.pem" /out/lab.crt &&
+                cp -L "/etc/letsencrypt/live/$1/privkey.pem" /out/lab.key &&
+                chown "$2" /out/lab.crt /out/lab.key &&
+                chmod 644 /out/lab.crt /out/lab.key' sh "$LAB_HOST" "$(id -u):$(id -g)" \
+            || error "Could not copy the certificate out of $LE_DIR."
+    fi
+elif ! cert_fits 1; then
+    info "Making a self-signed certificate for $LAB_HOST"
+    rm -f "$CERT_DIR/lab.crt" "$CERT_DIR/lab.key"
     openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
         -subj "/CN=$LAB_HOST" -addext "subjectAltName=DNS:$LAB_HOST" \
         -keyout "$CERT_DIR/lab.key" -out "$CERT_DIR/lab.crt" 2>/dev/null
     chmod 644 "$CERT_DIR/lab.key"   # read by nginx inside its container
-    # The gateway image is built on eclipse-temurin 21, so its keytool and
-    # default trust store match the JVM that loads the result.
+fi
+
+# --- 6. gateway trust store -------------------------------------------------
+
+# nginx answers the lab host name on 443 inside Docker as well, through the
+# network alias in docker-compose.heropa.yml, so the gateway reaches Keycloak
+# without leaving the VM. A Let's Encrypt certificate is trusted anyway, and a
+# self-signed one is trusted through this copy of the Java trust store. The
+# gateway image is built on eclipse-temurin 21, so its keytool and default
+# trust store match the JVM that loads the result.
+if [[ ! -s "$CERT_DIR/truststore.p12" || "$CERT_DIR/lab.crt" -nt "$CERT_DIR/truststore.p12" ]]; then
+    info "Building the gateway trust store"
+    rm -f "$CERT_DIR/truststore.p12"
     docker run --rm --user "$(id -u):$(id -g)" -v "$CERT_DIR:/certs" \
         --entrypoint sh eclipse-temurin:21-jre -c '
             cp "$JAVA_HOME/lib/security/cacerts" /certs/truststore.p12 &&
@@ -186,31 +269,36 @@ if ! openssl x509 -in "$CERT_DIR/lab.crt" -noout -checkhost "$LAB_HOST" 2>/dev/n
             keytool -importcert -noprompt -alias ohs-lab -file /certs/lab.crt \
                 -keystore /certs/truststore.p12 -storepass changeit >/dev/null' \
         || error "Could not build the gateway trust store."
+    # Containers that already loaded the old trust store keep it until they restart.
+    docker restart ohs-fhir-gateway >/dev/null 2>&1 || true
 fi
 
-# --- 5. start ---------------------------------------------------------------
+# --- 7. start ---------------------------------------------------------------
 
 info "Starting the stack behind the nginx front"
 "$SCRIPT_DIR/dev.sh" up --proxy ${UP_ARGS[@]+"${UP_ARGS[@]}"}
 
-# The gateway reached Keycloak at LAB_URL to start at all, so a failure here
-# usually means Cloudflare is not yet sending the name to this VM.
-if curl -fsS -m 10 -o /dev/null "$KEYCLOAK_URL/realms/ohs-player/.well-known/openid-configuration"; then
-    info "$LAB_URL reaches this VM through Cloudflare"
+# The check goes out to the public address and back, the same way a student's
+# browser arrives. A self-signed certificate is checked against itself.
+curl_args=()
+[[ "$LAB_CERT" == self-signed ]] && curl_args=(--cacert "$CERT_DIR/lab.crt")
+if curl -fsS -m 10 -o /dev/null ${curl_args[@]+"${curl_args[@]}"} \
+    "$KEYCLOAK_URL/realms/ohs-player/.well-known/openid-configuration"; then
+    info "$LAB_URL answers from outside the VM"
 else
-    warn "$LAB_URL did not answer. Check that Cloudflare points $LAB_HOST at this VM and that inbound TCP 443 is open."
+    warn "$LAB_URL did not answer. Check that $LAB_HOST resolves to this VM's public IP and that inbound TCP 443 is open."
 fi
 
 cat <<EOF
 
-The lab is served at $LAB_URL. Give each Heropa Iframe interface one of
-these paths.
+The lab is served at $LAB_URL
 
-  Web Portal               /web
-  Keycloak admin console   /keycloak/admin/
-  FHIR gateway             /gateway/fhir/metadata
-  Superset                 /superset/
-  Pipeline control panel   /pipeline/
+  Web Portal               $LAB_URL/web
+  Keycloak admin console   $LAB_URL/keycloak/admin/
+  FHIR gateway             $LAB_URL/gateway/fhir/metadata
+  Superset                 $LAB_URL/superset/
+  Pipeline control panel   $LAB_URL/pipeline/
 
 Superset and the pipeline control panel answer once ./dev.sh up --pipes has run.
+Open these in a browser tab on your own computer.
 EOF
